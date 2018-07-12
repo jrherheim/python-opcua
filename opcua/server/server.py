@@ -3,7 +3,7 @@ High level interface to pure python OPC-UA server
 """
 
 import logging
-from datetime import timedelta
+from datetime import timedelta, datetime
 try:
     from urllib.parse import urlparse
 except ImportError:
@@ -22,7 +22,7 @@ from opcua.client.client import Client
 from opcua.crypto import security_policies
 from opcua.common.event_objects import BaseEvent
 from opcua.common.shortcuts import Shortcuts
-from opcua.common.structures import load_type_definitions
+from opcua.common.structures import load_type_definitions, load_enums
 from opcua.common.xmlexporter import XmlExporter
 from opcua.common.xmlimporter import XmlImporter
 from opcua.common.ua_utils import get_nodes_of_namespace
@@ -59,8 +59,6 @@ class Server(object):
     As a result the first startup will be even slower due to the cache file
     generation but all further start ups will be significantly faster.
 
-    :ivar application_uri:
-    :vartype application_uri: uri
     :ivar product_uri:
     :vartype product_uri: uri
     :ivar name:
@@ -79,9 +77,10 @@ class Server(object):
     def __init__(self, shelffile=None, iserver=None):
         self.logger = logging.getLogger(__name__)
         self.endpoint = urlparse("opc.tcp://0.0.0.0:4840/freeopcua/server/")
-        self.application_uri = "urn:freeopcua:python:server"
-        self.product_uri = "urn:freeopcua.github.no:python:server"
+        self._application_uri = "urn:freeopcua:python:server"
+        self.product_uri = "urn:freeopcua.github.io:python:server"
         self.name = "FreeOpcUa Python Server"
+        self.manufacturer_name = "FreeOpcUa"
         self.application_type = ua.ApplicationType.ClientAndServer
         self.default_timeout = 3600000
         if iserver is not None:
@@ -97,8 +96,32 @@ class Server(object):
         self.nodes = Shortcuts(self.iserver.isession)
 
         # setup some expected values
+        self.set_application_uri(self._application_uri)
         sa_node = self.get_node(ua.NodeId(ua.ObjectIds.Server_ServerArray))
-        sa_node.set_value([self.application_uri])
+        sa_node.set_value([self._application_uri])
+        status_node = self.get_node(ua.NodeId(ua.ObjectIds.Server_ServerStatus))
+        build_node = self.get_node(ua.NodeId(ua.ObjectIds.Server_ServerStatus_BuildInfo))
+        status = ua.ServerStatusDataType()
+        status.BuildInfo.ProductUri = self.product_uri
+        status.BuildInfo.ManufacturerName = self.manufacturer_name
+        status.BuildInfo.ProductName = self.name
+        status.BuildInfo.SoftwareVersion = "1.0pre"
+        status.BuildInfo.BuildNumber = "0"
+        status.BuildInfo.BuildDate = datetime.now()
+        status.SecondsTillShutdown = 0
+        status_node.set_value(status)
+        build_node.set_value(status.BuildInfo)
+
+
+        # enable all endpoints by default
+        self._security_policy = [
+                        ua.SecurityPolicyType.NoSecurity,
+                        ua.SecurityPolicyType.Basic128Rsa15_SignAndEncrypt,
+                        ua.SecurityPolicyType.Basic128Rsa15_Sign,
+                        ua.SecurityPolicyType.Basic256_SignAndEncrypt,
+                        ua.SecurityPolicyType.Basic256_Sign
+                                ]
+        self._policyIDs = ["Anonymous", "Basic256", "Basic128", "Username"]
 
     def __enter__(self):
         self.start()
@@ -131,7 +154,14 @@ class Server(object):
         your system!
         default is : "urn:freeopcua:python:server"
         """
-        self.application_uri = uri
+        self._application_uri = uri
+        ns_node = self.get_node(ua.NodeId(ua.ObjectIds.Server_NamespaceArray))
+        uries = ns_node.get_value()
+        if len(uries) > 1:
+            uries[1] = uri  # application uri is always namespace 1
+        else:
+            uries.append(uri)
+        ns_node.set_value(uries)
 
     def find_servers(self, uris=None):
         """
@@ -193,61 +223,122 @@ class Server(object):
     def get_endpoints(self):
         return self.iserver.get_endpoints()
 
+    def set_security_policy(self, security_policy):
+        """
+            Method setting up the security policies for connections
+            to the server, where security_policy is a list of integers.
+            During server initialization, all endpoints are enabled:
+
+                security_policy = [
+                            ua.SecurityPolicyType.NoSecurity,
+                            ua.SecurityPolicyType.Basic128Rsa15_SignAndEncrypt,
+                            ua.SecurityPolicyType.Basic128Rsa15_Sign,
+                            ua.SecurityPolicyType.Basic256_SignAndEncrypt,
+                            ua.SecurityPolicyType.Basic256_Sign
+                                ]
+
+            E.g. to limit the number of endpoints and disable no encryption:
+
+                set_security_policy([
+                            ua.SecurityPolicyType.Basic128Rsa15_SignAndEncrypt
+                            ua.SecurityPolicyType.Basic256_SignAndEncrypt])
+
+        """
+        self._security_policy = security_policy
+
+    def set_security_IDs(self, policyIDs):
+        """
+            Method setting up the security endpoints for identification
+            of clients. During server object initialization, all possible 
+            endpoints are enabled:
+
+            self._policyIDs = ["Anonymous", "Basic256", "Basic128", "Username"]
+
+            E.g. to limit the number of IDs and disable anonymous clients:
+
+                set_security_policy(["Basic256"])
+
+            (Implementation for ID check is currently not finalized...)
+
+        """
+        self._policyIDs = policyIDs
+
     def _setup_server_nodes(self):
         # to be called just before starting server since it needs all parameters to be setup
-        self.register_namespace(self.application_uri)
-        self._set_endpoints()
-        self._policies = [ua.SecurityPolicyFactory()]
-        if self.certificate and self.private_key:
-            self._set_endpoints(security_policies.SecurityPolicyBasic128Rsa15,
-                                ua.MessageSecurityMode.SignAndEncrypt)
-            self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic128Rsa15,
-                                                           ua.MessageSecurityMode.SignAndEncrypt,
-                                                           self.certificate,
-                                                           self.private_key)
-                                 )
-            self._set_endpoints(security_policies.SecurityPolicyBasic128Rsa15,
-                                ua.MessageSecurityMode.Sign)
-            self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic128Rsa15,
-                                                           ua.MessageSecurityMode.Sign,
-                                                           self.certificate,
-                                                           self.private_key)
-                                 )
-            self._set_endpoints(security_policies.SecurityPolicyBasic256,
-                                ua.MessageSecurityMode.SignAndEncrypt)
-            self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic256,
-                                                           ua.MessageSecurityMode.SignAndEncrypt,
-                                                           self.certificate,
-                                                           self.private_key)
-                                 )
-            self._set_endpoints(security_policies.SecurityPolicyBasic256,
-                                ua.MessageSecurityMode.Sign)
-            self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic256,
-                                                           ua.MessageSecurityMode.Sign,
-                                                           self.certificate,
-                                                           self.private_key)
-                                 )
+        if ua.SecurityPolicyType.NoSecurity in self._security_policy:
+            self._set_endpoints()
+            self._policies = [ua.SecurityPolicyFactory()]
+
+        if self._security_policy != [ua.SecurityPolicyType.NoSecurity]:
+            if not (self.certificate and self.private_key):
+                self.logger.warning("Endpoints other than open requested but private key and certificate are not set.")
+                return
+
+            if ua.SecurityPolicyType.NoSecurity in self._security_policy:
+                self.logger.warning("Creating an open endpoint to the server, although encrypted endpoints are enabled.")
+
+            if ua.SecurityPolicyType.Basic128Rsa15_SignAndEncrypt in self._security_policy:
+                self._set_endpoints(security_policies.SecurityPolicyBasic128Rsa15,
+                                    ua.MessageSecurityMode.SignAndEncrypt)
+                self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic128Rsa15,
+                                                               ua.MessageSecurityMode.SignAndEncrypt,
+                                                               self.certificate,
+                                                               self.private_key)
+                                     )
+            if ua.SecurityPolicyType.Basic128Rsa15_Sign in self._security_policy:
+                self._set_endpoints(security_policies.SecurityPolicyBasic128Rsa15,
+                                    ua.MessageSecurityMode.Sign)
+                self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic128Rsa15,
+                                                               ua.MessageSecurityMode.Sign,
+                                                               self.certificate,
+                                                               self.private_key)
+                                     )
+            if ua.SecurityPolicyType.Basic256_SignAndEncrypt in self._security_policy:
+                self._set_endpoints(security_policies.SecurityPolicyBasic256,
+                                    ua.MessageSecurityMode.SignAndEncrypt)
+                self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic256,
+                                                               ua.MessageSecurityMode.SignAndEncrypt,
+                                                               self.certificate,
+                                                               self.private_key)
+                                     )
+            if ua.SecurityPolicyType.Basic256_Sign in self._security_policy:
+                self._set_endpoints(security_policies.SecurityPolicyBasic256,
+                                    ua.MessageSecurityMode.Sign)
+                self._policies.append(ua.SecurityPolicyFactory(security_policies.SecurityPolicyBasic256,
+                                                               ua.MessageSecurityMode.Sign,
+                                                               self.certificate,
+                                                               self.private_key)
+                                     )
 
     def _set_endpoints(self, policy=ua.SecurityPolicy, mode=ua.MessageSecurityMode.None_):
-        idtoken = ua.UserTokenPolicy()
-        idtoken.PolicyId = 'anonymous'
-        idtoken.TokenType = ua.UserTokenType.Anonymous
+        idtokens = []
+        if "Anonymous" in self._policyIDs:
+            idtoken = ua.UserTokenPolicy()
+            idtoken.PolicyId = 'anonymous'
+            idtoken.TokenType = ua.UserTokenType.Anonymous
+            idtokens.append(idtoken)
 
-        idtoken2 = ua.UserTokenPolicy()
-        idtoken2.PolicyId = 'certificate_basic256'
-        idtoken2.TokenType = ua.UserTokenType.Certificate
+        if "Basic256" in self._policyIDs:
+            idtoken = ua.UserTokenPolicy()
+            idtoken.PolicyId = 'certificate_basic256'
+            idtoken.TokenType = ua.UserTokenType.Certificate
+            idtokens.append(idtoken)
 
-        idtoken3 = ua.UserTokenPolicy()
-        idtoken3.PolicyId = 'certificate_basic128'
-        idtoken3.TokenType = ua.UserTokenType.Certificate
+        if "Basic128" in self._policyIDs:
+            idtoken = ua.UserTokenPolicy()
+            idtoken.PolicyId = 'certificate_basic128'
+            idtoken.TokenType = ua.UserTokenType.Certificate
+            idtokens.append(idtoken)
 
-        idtoken4 = ua.UserTokenPolicy()
-        idtoken4.PolicyId = 'username'
-        idtoken4.TokenType = ua.UserTokenType.UserName
+        if "Username" in self._policyIDs:
+            idtoken = ua.UserTokenPolicy()
+            idtoken.PolicyId = 'username'
+            idtoken.TokenType = ua.UserTokenType.UserName
+            idtokens.append(idtoken)
 
         appdesc = ua.ApplicationDescription()
         appdesc.ApplicationName = ua.LocalizedText(self.name)
-        appdesc.ApplicationUri = self.application_uri
+        appdesc.ApplicationUri = self._application_uri
         appdesc.ApplicationType = self.application_type
         appdesc.ProductUri = self.product_uri
         appdesc.DiscoveryUrls.append(self.endpoint.geturl())
@@ -259,7 +350,7 @@ class Server(object):
             edp.ServerCertificate = uacrypto.der_from_x509(self.certificate)
         edp.SecurityMode = mode
         edp.SecurityPolicyUri = policy.URI
-        edp.UserIdentityTokens = [idtoken, idtoken2, idtoken3, idtoken4]
+        edp.UserIdentityTokens = idtokens
         edp.TransportProfileUri = 'http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary'
         edp.SecurityLevel = 0
         self.iserver.add_endpoint(edp)
@@ -280,7 +371,6 @@ class Server(object):
         except Exception as exp:
             self.iserver.stop()
             raise exp
-
 
     def stop(self):
         """
@@ -320,6 +410,11 @@ class Server(object):
         Create a subscription.
         returns a Subscription object which allow
         to subscribe to events or data on server
+        period is in milliseconds
+        handler is a python object with following methods:
+            def datachange_notification(self, node, val, data):
+            def event_notification(self, event):
+            def status_change_notification(self, status):
         """
         params = ua.CreateSubscriptionParameters()
         params.RequestedPublishingInterval = period
@@ -420,12 +515,12 @@ class Server(object):
 
         return custom_t
 
-    def import_xml(self, path):
+    def import_xml(self, path=None, xmlstring=None):
         """
         Import nodes defined in xml
         """
         importer = XmlImporter(self)
-        return importer.import_xml(path)
+        return importer.import_xml(path, xmlstring)
 
     def export_xml(self, nodes, path):
         """
@@ -525,4 +620,15 @@ class Server(object):
         self.iserver.isession.add_method_callback(node.nodeid, callback)
 
     def load_type_definitions(self, nodes=None):
+        """
+        load custom structures from our server.
+        Server side this can be used to create python objects from custom structures
+        imported through xml into server
+        """
         return load_type_definitions(self, nodes)
+
+    def load_enums(self):
+        """
+        load UA structures and generate python Enums in ua module for custom enums in server
+        """
+        return load_enums(self)

@@ -3,10 +3,14 @@ import unittest
 from opcua import Client
 from opcua import Server
 from opcua import ua
+from opcua.client.ua_client import UASocketClient
+from opcua.common.utils import SocketWrapper
 
 from tests_subscriptions import SubscriptionTests
 from tests_common import CommonTests, add_server_methods
 from tests_xml import XmlTests
+
+from tests_enum_struct import add_server_custom_enum_struct
 
 port_num1 = 48510
 
@@ -24,6 +28,7 @@ class TestClient(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
         cls.srv = Server()
         cls.srv.set_endpoint('opc.tcp://127.0.0.1:{0:d}'.format(port_num1))
         add_server_methods(cls.srv)
+        add_server_custom_enum_struct(cls.srv)
         cls.srv.start()
 
         # start admin client
@@ -105,7 +110,26 @@ class TestClient(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
             Alldue the server trace is also visible on the console.
             The client only 'sees' an TimeoutError
         '''
-        nenumstrings = self.opc.get_node(ua.ObjectIds.AxisScaleEnumeration_EnumStrings)
+        nenumstrings = self.clt.get_node(ua.ObjectIds.AxisScaleEnumeration_EnumStrings)
         with self.assertNotRaises(Exception):
             value = ua.Variant(nenumstrings.get_value())
 
+    def test_uasocketclient_connect_disconnect(self):
+        """Initialize, connect, and disconnect a UaSocketClient
+        """
+        uaclt = UASocketClient()
+        uaclt.connect_socket('127.0.0.1', port_num1)
+        self.assertTrue(uaclt._thread.is_alive())
+        self.assertIsInstance(uaclt._socket, SocketWrapper)
+
+        # disconnect_socket() should shut down the receiving thread
+        uaclt.disconnect_socket()
+        self.assertFalse(uaclt._thread.is_alive())
+
+    def test_custom_enum_struct(self):
+        self.ro_clt.load_type_definitions()
+        ns = self.ro_clt.get_namespace_index('http://yourorganisation.org/struct_enum_example/')
+        myvar = self.ro_clt.get_node(ua.NodeId(6009, ns))
+        val = myvar.get_value()
+        self.assertEqual(val.IntVal1, 242)
+        self.assertEqual(val.EnumVal, ua.ExampleEnum.EnumVal2)

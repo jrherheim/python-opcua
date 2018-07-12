@@ -1,7 +1,11 @@
-import sys
-sys.path.insert(0, "..")
+from threading import Thread
+import copy
 import logging
 from datetime import datetime
+import time
+from math import sin
+import sys
+sys.path.insert(0, "..")
 
 try:
     from IPython import embed
@@ -9,9 +13,9 @@ except ImportError:
     import code
 
     def embed():
-        vars = globals()
-        vars.update(locals())
-        shell = code.InteractiveConsole(vars)
+        myvars = globals()
+        myvars.update(locals())
+        shell = code.InteractiveConsole(myvars)
         shell.interact()
 
 
@@ -49,6 +53,23 @@ def multiply(parent, x, y):
     return x * y
 
 
+class VarUpdater(Thread):
+    def __init__(self, var):
+        Thread.__init__(self)
+        self._stopev = False
+        self.var = var
+
+    def stop(self):
+        self._stopev = True
+
+    def run(self):
+        while not self._stopev:
+            v = sin(time.time() / 10)
+            self.var.set_value(v)
+            time.sleep(0.1)
+
+
+
 if __name__ == "__main__":
     # optional: setup logging
     logging.basicConfig(level=logging.WARN)
@@ -67,6 +88,13 @@ if __name__ == "__main__":
     #server.set_endpoint("opc.tcp://localhost:4840/freeopcua/server/")
     server.set_endpoint("opc.tcp://0.0.0.0:4840/freeopcua/server/")
     server.set_server_name("FreeOpcUa Example Server")
+    # set all possible endpoint policies for clients to connect through
+    server.set_security_policy([
+                ua.SecurityPolicyType.NoSecurity,
+                ua.SecurityPolicyType.Basic128Rsa15_SignAndEncrypt,
+                ua.SecurityPolicyType.Basic128Rsa15_Sign,
+                ua.SecurityPolicyType.Basic256_SignAndEncrypt,
+                ua.SecurityPolicyType.Basic256_Sign])
 
     # setup our own namespace
     uri = "http://examples.freeopcua.github.io"
@@ -74,10 +102,11 @@ if __name__ == "__main__":
 
     # create a new node type we can instantiate in our address space
     dev = server.nodes.base_object_type.add_object_type(0, "MyDevice")
-    dev.add_variable(0, "sensor1", 1.0)
-    dev.add_property(0, "device_id", "0340")
+    dev.add_variable(0, "sensor1", 1.0).set_modelling_rule(True)
+    dev.add_property(0, "device_id", "0340").set_modelling_rule(True)
     ctrl = dev.add_object(0, "controller")
-    ctrl.add_property(0, "state", "Idle")
+    ctrl.set_modelling_rule(True)
+    ctrl.add_property(0, "state", "Idle").set_modelling_rule(True)
 
     # populating our address space
 
@@ -89,6 +118,7 @@ if __name__ == "__main__":
     # create directly some objects and variables
     myobj = server.nodes.objects.add_object(idx, "MyObject")
     myvar = myobj.add_variable(idx, "MyVariable", 6.7)
+    mysin = myobj.add_variable(idx, "MySin", 0, ua.VariantType.Float)
     myvar.set_writable()    # Set MyVariable to be writable by clients
     mystringvar = myobj.add_variable(idx, "MyStringVariable", "Really nice string")
     mystringvar.set_writable()    # Set MyVariable to be writable by clients
@@ -112,15 +142,22 @@ if __name__ == "__main__":
     # starting!
     server.start()
     print("Available loggers are: ", logging.Logger.manager.loggerDict.keys())
+    vup = VarUpdater(mysin)  # just  a stupide class update a variable
+    vup.start()
     try:
         # enable following if you want to subscribe to nodes on server side
         #handler = SubHandler()
         #sub = server.create_subscription(500, handler)
         #handle = sub.subscribe_data_change(myvar)
         # trigger event, all subscribed clients wil receive it
+        var = myarrayvar.get_value()  # return a ref to value in db server side! not a copy!
+        var = copy.copy(var)  # WARNING: we need to copy before writting again otherwise no data change event will be generated
+        var.append(9.3)
+        myarrayvar.set_value(var)
         mydevice_var.set_value("Running")
         myevgen.trigger(message="This is BaseEvent")
 
         embed()
     finally:
+        vup.stop()
         server.stop()

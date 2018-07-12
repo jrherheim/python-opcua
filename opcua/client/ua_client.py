@@ -52,7 +52,7 @@ class UASocketClient(object):
             self.logger.debug("Sending: %s", request)
             try:
                 binreq = struct_to_binary(request)
-            except:
+            except Exception:
                 # reset reqeust handle if any error
                 # see self._create_request_header
                 self._request_handle -= 1
@@ -117,7 +117,10 @@ class UASocketClient(object):
         with self._lock:
             future = self._callbackmap.pop(request_id, None)
             if future is None:
-                raise ua.UaError("No future object found for request: {0}, callbacks in list are {1}".format(request_id, self._callbackmap.keys()))
+                raise ua.UaError(
+                    "No future object found for request: {0}, callbacks in list are {1}"
+                    .format(request_id, self._callbackmap.keys())
+                )
         future.set_result(body)
 
     def _create_request_header(self, timeout=1000):
@@ -134,17 +137,22 @@ class UASocketClient(object):
         """
         self.logger.info("opening connection")
         sock = socket.create_connection((host, port))
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # nodelay ncessary to avoid packing in one frame, some servers do not like it
+        # nodelay ncessary to avoid packing in one frame, some servers do not like it
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._socket = ua.utils.SocketWrapper(sock)
         self.start()
 
     def disconnect_socket(self):
-        self.logger.info("stop request")
+        self.logger.info("Request to close socket received")
         self._do_stop = True
         self._socket.socket.shutdown(socket.SHUT_RDWR)
         self._socket.socket.close()
+        self.logger.info("Socket closed, waiting for receiver thread to terminate...")
+        if self._thread and self._thread.is_alive():
+            self._thread.join()
+        self.logger.info("Done closing socket: Receiving thread terminated, socket disconnected")
 
-    def send_hello(self, url, max_messagesize = 0, max_chunkcount = 0):
+    def send_hello(self, url, max_messagesize=0, max_chunkcount=0):
         hello = ua.Hello()
         hello.EndpointUrl = url
         hello.MaxMessageSize = max_messagesize
@@ -162,7 +170,7 @@ class UASocketClient(object):
         request = ua.OpenSecureChannelRequest()
         request.Parameters = params
         future = self._send_request(request, message_type=ua.MessageType.SecureOpen)
-        
+
         # FIXME: we have a race condition here
         # we can get a packet with the new token id before we reach to store it..
         response = struct_from_binary(ua.OpenSecureChannelResponse, future.result(self.timeout))
@@ -172,9 +180,9 @@ class UASocketClient(object):
 
     def close_secure_channel(self):
         """
-        close secure channel. It seems to trigger a shutdown of socket
-        in most servers, so be prepare to reconnect.
-        OPC UA specs Part 6, 7.1.4 say that Server does not send a CloseSecureChannel response and should just close socket
+        close secure channel. It seems to trigger a shutdown of socket in most servers, so be prepare to reconnect.
+        OPC UA specs Part 6, 7.1.4 say that Server does not send a CloseSecureChannel response and should just close
+        socket
         """
         self.logger.info("close_secure_channel")
         request = ua.CloseSecureChannelRequest()
@@ -220,7 +228,7 @@ class UaClient(object):
     def disconnect_socket(self):
         return self._uasocket.disconnect_socket()
 
-    def send_hello(self, url, max_messagesize = 0, max_chunkcount = 0):
+    def send_hello(self, url, max_messagesize=0, max_chunkcount=0):
         return self._uasocket.send_hello(url, max_messagesize, max_chunkcount)
 
     def open_secure_channel(self, params):
@@ -431,10 +439,10 @@ class UaClient(object):
         # check if answer looks ok
         try:
             self._uasocket.check_answer(data, "while waiting for publish response")
-        except BadTimeout: # Spec Part 4, 7.28
+        except BadTimeout:  # Spec Part 4, 7.28
             self.publish()
             return
-        except BadNoSubscription: # Spec Part 5, 13.8.1
+        except BadNoSubscription:  # Spec Part 5, 13.8.1
             # BadNoSubscription is expected after deleting the last subscription.
             #
             # We should therefore also check for len(self._publishcallbacks) == 0, but
@@ -460,7 +468,7 @@ class UaClient(object):
             #       catch BadTimeout above. However, it's not really clear what this code
             #       does so it stays in, doesn't seem to hurt.
             self.logger.exception("Error parsing notificatipn from server")
-            self.publish([]) #send publish request ot server so he does stop sending notifications
+            self.publish([])  # send publish request ot server so he does stop sending notifications
             return
 
         # look for callback
@@ -525,7 +533,6 @@ class UaClient(object):
         self.logger.debug(response)
         response.ResponseHeader.ServiceResult.check()
         return response.Parameters.Results
-
 
     def delete_nodes(self, params):
         self.logger.info("delete_nodes")
